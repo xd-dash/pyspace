@@ -1,0 +1,29 @@
+name: Router
+description: >-
+  Adds an importable Python router package to requirements.txt for
+  pyspace deployment composition. ROUTER_MODULE selects the module at
+  instance initialization, while pyspace's runtime registry can also
+  register any installed module later without mutating Flask's URL map.
+
+inputs:
+  router-package:
+    description: >-
+      pip requirement spec for the router package, e.g.
+      "git+https://github.com/dash-xd/gcp-python-function-inspector.git@<sha>".
+      Prefer an immutable revision for qualification/deployment composition.
+      Leave empty to keep the pyspace shell application-free.
+    required: false
+    default: ""
+  working-directory:
+    description: Directory containing this shell's requirements.txt.
+    required: false
+    default: "."
+
+runs:
+  using: composite
+  steps:
+    - name: Add router package to requirements.txt
+      if: ${{ inputs.router-package != '' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: echo "${{ inputs.router-package }}" >> requirements.txt
