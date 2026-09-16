@@ -1,0 +1,26 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - codex/embedded-gospace
+
+permissions:
+  contents: read
+
+jobs:
+  python312:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and tests
+        run: python -m pip install -e '.[test]'
+      - name: Verify native extension is built
+        run: python -c 'import _gospace_native; print(_gospace_native.__file__)'
+      - name: Run tests
+        run: python -m pytest -q
