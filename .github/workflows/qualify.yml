@@ -1,0 +1,50 @@
+name: qualify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - codex/embedded-gospace-dynamic-python
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
+
+      - name: Install pyspace
+        run: python -m pip install -e '.[test]'
+
+      - name: Unit tests
+        run: python -m pytest -q
+
+      - name: Checkout gospace embedded ABI
+        uses: actions/checkout@v4
+        with:
+          repository: dash-xd/gospace
+          ref: codex/embedded-c-abi
+          path: .qualify/gospace
+
+      - name: Build libgospace.so
+        working-directory: .qualify/gospace/gospace
+        run: |
+          go build -buildmode=c-shared -trimpath -ldflags='-s -w' -o "$GITHUB_WORKSPACE/.qualify/libgospace.so" ./cmd/cshared
+
+      - name: ABI integration and benchmark
+        env:
+          PYSPACE_GOSPACE_LIBRARY: ${{ github.workspace }}/.qualify/libgospace.so
+        run: python benchmarks/native_abi.py --assert
