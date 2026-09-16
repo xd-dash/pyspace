@@ -16,6 +16,7 @@ CONTROL_TOKEN_HEADER = "X-Pyspace-Control-Token"
 APP_HEADER = "X-Pyspace-App"
 MODULE_HINT_HEADER = "X-Pyspace-Module"
 HEALTH_PATH = "/_pyspace/healthz"
+PYTHON_SOURCE_PREFIX = "/_pyspace/python/"
 
 
 class Service:
@@ -23,8 +24,9 @@ class Service:
 
     Python router support is capability-lazy: deployments with no ROUTER_MODULE
     import no customer Python router and construct no Jinja environment. A
-    router may still be loaded later through the authenticated module hint or
-    control API, so separate gospace-only deployment rules are unnecessary.
+    router may still be loaded later through authenticated control requests.
+    Dynamic source loading deliberately imports its loader only on that cold
+    control path, so gospace-only requests do not pay for it.
     """
 
     def __init__(self, *, root=None, router_env_var="ROUTER_MODULE", control_token=None, **_compat):
@@ -37,14 +39,13 @@ class Service:
         self._python_routes: dict[str, list[str]] = {}
         self._has_python = False
         self._gospace = None
+        self._python_modules: dict[str, object] = {}
 
     def build_app(self):
         self.app = current_app
         return self.app
 
     def build_jinja_env(self):
-        # Retain pyspace-minimal's template capability without charging gospace-
-        # only deployments for Jinja imports or environment construction.
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         root = self.root or os.getcwd()
         self.env = Environment(loader=FileSystemLoader(root), autoescape=select_autoescape(["html", "xml", "htm", ".xhtml", ".svg"]))
@@ -73,6 +74,20 @@ class Service:
         if not isinstance(routes, Mapping):
             raise TypeError(f"module {module_name!r} must expose a ROUTES mapping")
         self.register_routes(name, routes)
+        self._python_modules[name] = module
+
+    def register_source(self, name: str, source: bytes, *, filename: str | None = None) -> None:
+        # Cold capability path: keep compile/ModuleType/sys.modules machinery out
+        # of module import and out of gospace-only request handling.
+        from .dynamic import load_source
+        loaded = load_source(name, source, filename=filename)
+        try:
+            self.register_routes(name, loaded.routes)
+        except BaseException:
+            import sys
+            sys.modules.pop(loaded.module_name, None)
+            raise
+        self._python_modules[name] = loaded.module
 
     def compose_from_environment(self) -> None:
         library = os.environ.get("PYSPACE_GOSPACE_LIBRARY")
@@ -107,9 +122,6 @@ class Service:
                     return loaded
                 return "unknown application", 404
 
-        # Fastest common case: no Python routers have ever been loaded. The only
-        # Python-side routing work is one optional hint lookup before crossing
-        # directly into the in-process Go ABI.
         if self._gospace is not None and not self._has_python:
             if not request.headers.get(MODULE_HINT_HEADER):
                 return self._gospace(request)
@@ -158,6 +170,21 @@ class Service:
             return "Not Found", 404
         if request.path == "/_pyspace/apps" and request.method == "GET":
             return jsonify({"active": self.registry.active(), "apps": list(self.registry.names()), "gospace": self._gospace is not None})
+
+        if request.path.startswith(PYTHON_SOURCE_PREFIX) and request.method == "POST":
+            name = request.path[len(PYTHON_SOURCE_PREFIX):]
+            if not name or "/" in name:
+                return "invalid application name", 400
+            try:
+                self.register_source(name, request.get_data(cache=False), filename=f"pyspace://{name}/router.py")
+            except ApplicationExists:
+                return "application already registered; use a versioned name", 409
+            except (SyntaxError, TypeError, ValueError, ImportError) as exc:
+                return str(exc), 400
+            if request.args.get("activate", "").lower() == "true":
+                self.registry.activate(name)
+            return jsonify({"name": name, "source": "python", "active": self.registry.active() == name}), 201
+
         prefix = "/_pyspace/module/"
         if request.path.startswith(prefix) and request.method == "POST":
             name = request.path[len(prefix):]
