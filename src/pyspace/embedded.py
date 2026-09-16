@@ -29,10 +29,10 @@ class EmbeddedGospaceBackend:
         return result
 
     def __call__(self, request):
-        response = self.runtime.dispatch(
+        status, response_headers, body = self.runtime.dispatch_raw(
             request.method.encode("ascii"),
             request.full_path.rstrip("?").encode("latin-1"),
             self._headers(request),
             request.get_data(cache=False),
         )
-        return response.body, response.status, self._response_headers(response.headers)
+        return body, status, self._response_headers(response_headers)
