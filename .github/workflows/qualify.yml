@@ -61,11 +61,10 @@ jobs:
           EOF
           gofmt -w cmd/cshared/deployment_bench.go
 
-      - name: Build embedded and historical gospace artifacts
+      - name: Build embedded gospace artifacts
         run: |
           cd .qualify/gospace/gospace
           go build -buildmode=c-shared -trimpath -ldflags='-s -w' -o "$GITHUB_WORKSPACE/.qualify/libgospace.so" ./cmd/cshared
-          go build -trimpath -ldflags='-s -w' -o "$GITHUB_WORKSPACE/.qualify/gospace-api" ./cmd/api
           cd "$GITHUB_WORKSPACE/.qualify/gospace/examples/wasm-chi"
           go mod download
           GOOS=wasip1 GOARCH=wasm go build -mod=mod -trimpath -ldflags='-s -w' -o "$GITHUB_WORKSPACE/.qualify/router.wasm" .
@@ -75,15 +74,3 @@ jobs:
           PYSPACE_GOSPACE_LIBRARY: ${{ github.workspace }}/.qualify/libgospace.so
           GOSPACE_CONTROL_TOKEN: qualification-token
         run: python benchmarks/native_abi.py --wasm .qualify/router.wasm --assert
-
-      - name: Checkout historical pyspace UDS implementation
-        uses: actions/checkout@v4
-        with:
-          repository: xd-dash/pyspace
-          ref: main
-          path: .qualify/pyspace-uds
-
-      - name: Historical UDS subprocess benchmark
-        env:
-          PYTHONPATH: ${{ github.workspace }}/.qualify/pyspace-uds/src
-        run: python benchmarks/uds_baseline.py --binary .qualify/gospace-api
