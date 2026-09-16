@@ -62,10 +62,10 @@ class NativeGospace:
         buf = (ctypes.c_uint8 * len(value)).from_buffer_copy(value)
         return ctypes.cast(buf, ctypes.POINTER(ctypes.c_uint8)), buf
 
-    def dispatch(self, method: bytes, uri: bytes, headers: bytes, body: bytes) -> NativeResponse:
+    def dispatch_raw(self, method: bytes, uri: bytes, headers: bytes, body: bytes) -> tuple[int, bytes, bytes]:
+        """Return the ABI tuple directly for adapters on the steady-state path."""
         if self._extension is not None:
-            status, response_headers, response_body = self._extension.dispatch(method, uri, headers, body)
-            return NativeResponse(status, response_headers, response_body)
+            return self._extension.dispatch(method, uri, headers, body)
 
         values = (method, uri, headers, body)
         pointers = [self._ptr(value) for value in values]
@@ -79,6 +79,10 @@ class NativeGospace:
         try:
             response_headers = ctypes.string_at(out.headers, out.headers_len) if out.headers_len else b""
             response_body = ctypes.string_at(out.body, out.body_len) if out.body_len else b""
-            return NativeResponse(int(out.status), response_headers, response_body)
+            return int(out.status), response_headers, response_body
         finally:
             self._lib.gs_free_response(ctypes.byref(out))
+
+    def dispatch(self, method: bytes, uri: bytes, headers: bytes, body: bytes) -> NativeResponse:
+        status, response_headers, response_body = self.dispatch_raw(method, uri, headers, body)
+        return NativeResponse(status, response_headers, response_body)
