@@ -74,8 +74,7 @@ static PyObject *native_dispatch(PyObject *self, PyObject *args) {
 
     gs_response out = {0};
     int rc;
-    /* gospace owns no input pointers after gs_dispatch returns, so the GIL can
-       be released for the complete Go/WASM execution path. */
+    /* gospace retains no input pointers after gs_dispatch returns. */
     Py_BEGIN_ALLOW_THREADS
     rc = gs_dispatch_p((const uint8_t*)method, (size_t)method_len,
                        (const uint8_t*)uri, (size_t)uri_len,
@@ -84,37 +83,33 @@ static PyObject *native_dispatch(PyObject *self, PyObject *args) {
     Py_END_ALLOW_THREADS
 
     if (rc != 0) {
-        /* The ABI promises an initialized response even on failure. Free it in
-           case a future implementation attaches diagnostic storage. */
         if (gs_free_response_p) gs_free_response_p(&out);
         return PyErr_Format(PyExc_RuntimeError, "gospace dispatch failed: %d", rc);
     }
 
+    PyObject *py_status = PyLong_FromUnsignedLong(out.status);
     PyObject *py_headers = PyBytes_FromStringAndSize(
         (const char*)out.headers, (Py_ssize_t)out.headers_len);
     PyObject *py_body = PyBytes_FromStringAndSize(
         (const char*)out.body, (Py_ssize_t)out.body_len);
-    uint32_t status = out.status;
     gs_free_response_p(&out);
 
-    if (!py_headers || !py_body) {
+    if (!py_status || !py_headers || !py_body) {
+        Py_XDECREF(py_status);
         Py_XDECREF(py_headers);
         Py_XDECREF(py_body);
         return NULL;
     }
     PyObject *result = PyTuple_New(3);
     if (!result) {
+        Py_DECREF(py_status);
         Py_DECREF(py_headers);
         Py_DECREF(py_body);
         return NULL;
     }
-    PyTuple_SET_ITEM(result, 0, PyLong_FromUnsignedLong(status));
+    PyTuple_SET_ITEM(result, 0, py_status);
     PyTuple_SET_ITEM(result, 1, py_headers);
     PyTuple_SET_ITEM(result, 2, py_body);
-    if (PyTuple_GET_ITEM(result, 0) == NULL) {
-        Py_DECREF(result);
-        return NULL;
-    }
     return result;
 }
 
