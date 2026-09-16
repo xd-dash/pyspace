@@ -1,0 +1,76 @@
+name: qualify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - codex/embedded-gospace-dynamic-python
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+
+      - name: Install pyspace
+        run: python -m pip install -e '.[test]'
+
+      - name: Unit tests
+        run: python -m pytest -q
+
+      - name: Checkout gospace embedded ABI
+        uses: actions/checkout@v4
+        with:
+          repository: dash-xd/gospace
+          ref: codex/embedded-c-abi
+          path: .qualify/gospace
+
+      - name: Compose deployment-native benchmark router
+        working-directory: .qualify/gospace/gospace
+        run: |
+          cat > cmd/cshared/deployment_bench.go <<'EOF'
+          package main
+
+          import (
+              "net/http"
+              "github.com/dash-xd/gospace/service"
+          )
+
+          func init() {
+              deploymentRegister = func(s *service.Service) {
+                  err := s.RegisterFuncRoutes("native-bench", func(w http.ResponseWriter, _ *http.Request) {
+                      _, _ = w.Write([]byte("hello from native Go\n"))
+                  }, []string{"GET /native-hello"})
+                  if err != nil { panic(err) }
+              }
+          }
+          EOF
+          gofmt -w cmd/cshared/deployment_bench.go
+
+      - name: Build embedded gospace artifacts
+        run: |
+          cd .qualify/gospace/gospace
+          go build -buildmode=c-shared -trimpath -ldflags='-s -w' -o "$GITHUB_WORKSPACE/.qualify/libgospace.so" ./cmd/cshared
+          cd "$GITHUB_WORKSPACE/.qualify/gospace/examples/wasm-chi"
+          go mod download
+          GOOS=wasip1 GOARCH=wasm go build -mod=mod -trimpath -ldflags='-s -w' -o "$GITHUB_WORKSPACE/.qualify/router.wasm" .
+
+      - name: Embedded Python native and WASM benchmark
+        env:
+          PYSPACE_GOSPACE_LIBRARY: ${{ github.workspace }}/.qualify/libgospace.so
+          GOSPACE_CONTROL_TOKEN: qualification-token
+        run: python benchmarks/native_abi.py --wasm .qualify/router.wasm --assert

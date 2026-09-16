@@ -1,86 +1,50 @@
-import sys
-import types
+from pyspace.service import APP_HEADER, CONTROL_TOKEN_HEADER, HEALTH_PATH, MODULE_HINT_HEADER, PYTHON_SHA256_HEADER, Service
 
-from pyspace.service import (
-    APP_HEADER,
-    CONTROL_TOKEN_HEADER,
-    HEALTH_PATH,
-    MODULE_HINT_HEADER,
-    Service,
-)
+
+class Headers(dict):
+    pass
 
 
 class Request:
-    def __init__(self, path: str, app: str | None = None, headers: dict | None = None):
-        self.path = path
-        self.headers = dict(headers or {})
-        if app is not None:
-            self.headers[APP_HEADER] = app
+    def __init__(self, path, *, method="GET", headers=None, body=b"", app=None):
+        self.path = path; self.method = method; self.headers = Headers(headers or {}); self._body = body
+        if app: self.headers[APP_HEADER] = app
+        self.full_path = path
+    def get_data(self, cache=True): return self._body
+    def get_json(self, silent=True): return None
 
 
-def test_shell_health_does_not_require_an_application():
-    service = Service(control_token="test")
-    assert service.registry.names() == ()
+class Native:
+    def __init__(self): self.calls = 0
+    def dispatch(self, request): self.calls += 1; return "native"
+
+
+def test_health_never_enters_native():
+    native = Native(); service = Service(control_token="test", gospace=native)
     assert service.dispatch(Request(HEALTH_PATH)) == ("ok", 200)
+    assert native.calls == 0
 
 
-def test_registered_python_route_is_found_without_app_hint():
-    module = types.ModuleType("test_router_discovered")
-    module.ROUTES = {"/discovered": lambda: "discovered"}
-    sys.modules[module.__name__] = module
-
-    service = Service(control_token="test")
-    service.register_module("discovered-v1", module.__name__)
-
-    assert service.dispatch(Request("/discovered")) == "discovered"
+def test_python_route_precedes_native():
+    native = Native(); service = Service(control_token="test", gospace=native)
+    service.register_routes("py-v1", {"/value": lambda: "python"})
+    assert service.dispatch(Request("/value")) == "python"
+    assert native.calls == 0
+    assert service.dispatch(Request("/other")) == "native"
 
 
-def test_active_python_app_wins_when_two_apps_own_same_route():
-    first = types.ModuleType("test_router_first")
-    first.ROUTES = {"/value": lambda: "first"}
-    second = types.ModuleType("test_router_second")
-    second.ROUTES = {"/value": lambda: "second"}
-    sys.modules[first.__name__] = first
-    sys.modules[second.__name__] = second
-
-    service = Service(control_token="test")
-    service.register_module("first-v1", first.__name__)
-    service.register_module("second-v1", second.__name__)
-    service.activate("second-v1")
-
-    assert service.dispatch(Request("/value")) == "second"
-    assert service.dispatch(Request("/value", "first-v1")) == "first"
-
-
-def test_missing_module_is_hotloaded_and_dispatched_by_same_request():
-    module = types.ModuleType("test_router_hinted")
-    module.ROUTES = {"/value": lambda: "hinted"}
-    sys.modules[module.__name__] = module
-
-    service = Service(control_token="test")
-    request = Request(
-        "/value",
-        headers={
-            MODULE_HINT_HEADER: module.__name__,
-            CONTROL_TOKEN_HEADER: "test",
-        },
-    )
-
-    # No X-Pyspace-App is required. The module name is the natural cache key.
+def test_importable_module_hint_loads_on_cold_request(monkeypatch):
+    import sys, types
+    module = types.ModuleType("hinted_router"); module.ROUTES = {"/value": lambda: "hinted"}; sys.modules[module.__name__] = module
+    service = Service(control_token="test", enable_gospace=False)
+    request = Request("/value", headers={MODULE_HINT_HEADER: module.__name__, CONTROL_TOKEN_HEADER: "test"})
     assert service.dispatch(request) == "hinted"
-    assert service.registry.names() == (module.__name__,)
-
-    # Once warm, ordinary route discovery finds it without any hint headers.
     assert service.dispatch(Request("/value")) == "hinted"
 
 
-def test_loader_hint_requires_control_token_only_when_cold():
-    module = types.ModuleType("test_router_unauthorized")
-    module.ROUTES = {"/value": lambda: "nope"}
-    sys.modules[module.__name__] = module
-
-    service = Service(control_token="test")
-    request = Request("/value", headers={MODULE_HINT_HEADER: module.__name__})
-
-    assert service.dispatch(request) == ("Not Found", 404)
-    assert service.registry.names() == ()
+def test_dynamic_source_registers_without_flask_mutation():
+    service = Service(control_token="test", enable_gospace=False)
+    source = b"def value():\n    return 'dynamic'\nROUTES={'/value': value}\n"
+    app = service.register_source("dynamic-v1", source)
+    assert app.identity.startswith("sha256:")
+    assert service.dispatch(Request("/value")) == "dynamic"

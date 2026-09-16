@@ -1,138 +1,95 @@
 # pyspace
 
-`pyspace` is a Python 3.12 Google Cloud Functions Gen 1 host with no built-in app.
+`pyspace` is a Python 3.12 Google Cloud Functions Gen 1 composition shell. Flask/Functions Framework owns the single HTTP entry point; pyspace keeps routing below Flask so runtime registration never mutates Flask's URL map.
 
-Normal requests do not need routing headers. Pyspace first looks for the route in already-registered Python routers, then asks any registered gospace apps. Hints are optional shortcuts for a caller that already knows what should handle the request.
+## Runtime shape
 
-## Python router
+```text
+Python / Functions Framework
+          |
+        pyspace
+       /       \
+Python ROUTES   gospace C ABI
+                   |
+             native Go + WASM
+```
+
+Gospace is in-process. There is no child process, Unix socket, readiness protocol, internal HTTP proxy, or supervisor. `PYSPACE_GOSPACE_LIBRARY` points at a `libgospace.so` built from gospace's `cmd/cshared` ABI v1. If unset, the dynamic linker searches for `libgospace.so`.
+
+`PYSPACE_GOSPACE=auto` (default) lazily loads gospace only after Python routing misses. `off` produces a Python-only deployment with no native-library load attempt. `required` makes a missing native library fatal. This keeps Python support optional without introducing separate pyspace implementations.
+
+The hot native path performs one Python→C call per request. Method, URI, headers and body cross as coarse byte spans; gospace owns native/WASM route resolution, WASM compilation/cache lifecycle and response generation.
+
+## Bundled Python routers
+
+An importable module can expose the same minimal contract as `pyspace-minimal`:
 
 ```python
-# hello_router.py
 from flask import request
 
-
 def hello():
-    return "payload=" + request.get_data(as_text=True)
+    return {"hello": request.args.get("name", "world")}
 
-
-ROUTES = {
-    "/hello": hello,
-}
+ROUTES = {"/hello": hello}
 ```
 
-If `hello_router` is already registered, this is enough:
+Set `ROUTER_MODULE=hello_router`. Optional `PYSPACE_ROUTER_NAME` changes its immutable registry name and `PYSPACE_ROUTER_ACTIVATE=true` makes it win collisions with other Python routers.
+
+## Dynamic Python
+
+Trusted single-file Python routers can be compiled directly from bytes without a `/tmp` write/read cycle:
 
 ```http
-POST /hello
-Content-Type: text/plain
+POST /_pyspace/source/foo-v1
+X-Pyspace-Control-Token: ...
+X-Pyspace-Python-Sha256: sha256:<digest>
+Content-Type: text/x-python
 
-abc
+...module source exposing ROUTES...
 ```
 
-If the route is not registered yet, the same request can carry a loader hint:
+The digest is checked before execution. The source is compiled with a synthetic `pyspace://...` filename, executed as an ordinary module, and published only after its `ROUTES` mapping validates. Names are immutable: publish `foo-v2` rather than replacing `foo-v1`. Dynamic Python executes in the Cloud Function's trust domain and may import dependencies already installed in the deployment.
 
-```http
-POST /hello
-X-Pyspace-Module: hello_router
-X-Pyspace-Control-Token: <PYSPACE_CONTROL_TOKEN>
-Content-Type: text/plain
+Importable modules can also cold-load on the first application request with `X-Pyspace-Module` plus `X-Pyspace-Control-Token`. Once registered, subsequent requests need no hint.
 
-abc
-```
-
-Pyspace imports the module, registers it under its module name, then handles that same request. No separate registration call is required.
-
-`X-Pyspace-App` is optional. Use it when you already know the exact registered app and want to skip catchall discovery:
-
-```http
-POST /hello
-X-Pyspace-App: hello-v1
-```
-
-You can also pre-register the router at deployment:
+## Dispatch
 
 ```text
-ROUTER_MODULE=hello_router
-PYSPACE_ROUTER_NAME=hello-v1
-PYSPACE_ROUTER_ACTIVATE=true
-```
-
-## Gospace
-
-If a gospace executable is already registered with pyspace, ordinary requests that do not match a Python route fall through to gospace automatically.
-
-A cold request can supply the executable path as a hint:
-
-```http
-POST /users/42
-X-Pyspace-Gospace-Binary: /workspace/bin/gospace
-X-Pyspace-Control-Token: <PYSPACE_CONTROL_TOKEN>
-```
-
-Pyspace registers/spawns gospace and forwards the same request over its Unix socket.
-
-If the request also needs a cold WASM router inside gospace, it can carry gospace's own WASM hint in that same request. After both caches are warm, an ordinary request such as:
-
-```http
-GET /users/42
-```
-
-can resolve through:
-
-```text
-Python route lookup
-    -> miss
-registered gospace
-    -> registered native/WASM route lookup
-    -> match
-```
-
-## Resolution order
-
-```text
-explicit X-Pyspace-App, if supplied
-    -> direct registered app
-    -> load from supplied pyspace hint on a miss
-
+health/control
+    -> pyspace
+explicit X-Pyspace-App
+    -> named Python app
+Python route index
+    -> active owner, then first immutable owner
+optional import-module cold hint
+    -> register + dispatch same request
 otherwise
-    -> exact registered Python ROUTES match
-    -> registered gospace app(s)
-    -> optional Python/gospace loader hint
-    -> 404
+    -> gospace gs_dispatch
+    -> native registry / dynamic WASM registry
 ```
 
-Hints improve routing when the caller or a CDN already knows the destination, but they are not required for routes that the warm instance can discover itself.
+Python's route index uses copy-on-write publication. Warm reads therefore require no Python lock; registration is the uncommon synchronized path.
 
 ## Cloud Function entry point
 
 ```python
 import os
 from os import path
-
 from pyspace import Service
 
-app = Service(
-    root=os.environ.get(
-        "PYSPACE_ROOT",
-        path.dirname(path.abspath(__file__)),
-    )
-)
+app = Service(root=os.environ.get("PYSPACE_ROOT", path.dirname(path.abspath(__file__))))
 _dispatch = app.build()
-
 
 def main(request):
     return _dispatch(request)
 ```
 
-`PYSPACE_ROOT` is optional. Without it, pyspace uses the directory containing `main.py`.
+## Building gospace
 
-## Optional headers
+From the gospace module on its embedded-C-ABI branch/design:
 
-```text
-X-Pyspace-App             direct registered-app hint
-X-Pyspace-Module          importable Python module for a cold miss
-X-Pyspace-Gospace-Binary  gospace executable path for a cold miss
-X-Pyspace-Control-Token   required only when the request performs a runtime load
+```sh
+go build -buildmode=c-shared -trimpath -ldflags='-s -w' -o libgospace.so ./cmd/cshared
 ```
 
-The explicit `/_pyspace/...` control endpoints remain available for management, but normal lazy routing does not require a registration request first.
+Deployment-specific native routers are linked into that artifact at build time. Routers absent from the build remain eligible for gospace's immutable OTA WASM path.
