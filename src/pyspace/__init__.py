@@ -1,17 +1,15 @@
-from .gospace import GospaceBackend, GospaceConfig
+from .dynamic import PythonApplication, load_source
+from .native import GospaceNative
 from .registry import ApplicationExists, ApplicationRegistry, UnknownApplication
 from .service import CloudFunctionApp, Service
-from .supervisor import ProcessHandle, ProcessSpec, ProcessSupervisor
 
 __all__ = [
     "ApplicationExists",
     "ApplicationRegistry",
     "CloudFunctionApp",
-    "GospaceBackend",
-    "GospaceConfig",
-    "ProcessHandle",
-    "ProcessSpec",
-    "ProcessSupervisor",
+    "GospaceNative",
+    "PythonApplication",
     "Service",
     "UnknownApplication",
+    "load_source",
 ]
